@@ -598,7 +598,7 @@ module.exports = {
                 body: editor.value,
             }).then(() => {
                 statusIndicator.classList.remove('saving');
-                statusText.textContent = 'Saved ✨';
+                statusText.textContent = 'Saved';
                 
                 const stats = getContentStats(editor.value);
                 updateNoteInfo(stats);
@@ -608,7 +608,7 @@ module.exports = {
                 }, 2000);
             }).catch(err => {
                 statusIndicator.classList.remove('saving');
-                statusText.textContent = 'Save failed 😢';
+                statusText.textContent = 'Save failed';
                 console.error(err);
             });
         };
