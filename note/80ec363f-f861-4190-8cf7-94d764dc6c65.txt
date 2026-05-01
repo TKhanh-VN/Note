@@ -1,0 +1,327 @@
+const fs = require('fs');
+const axios = require('axios');
+const { resolve } = require('path');
+
+async function downloadMusicFromYoutube(link) {
+  const timestart = Date.now();
+
+  if (!link) {
+    return 'Thiếu link';
+  }
+
+  let resolveFunc, rejectFunc;
+  const returnPromise = new Promise((resolve, reject) => {
+    resolveFunc = resolve;
+    rejectFunc = reject;
+  });
+
+  try {
+    const apiResponse = await axios.post('https://app.ytdown.to/proxy.php', {
+      url: link
+    }, {
+      headers: {
+        'Accept': '*/*',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'Origin': 'https://app.ytdown.to',
+        'Referer': 'https://app.ytdown.to/vi21/',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+        'X-Requested-With': 'XMLHttpRequest'
+      }
+    });
+
+    const data = apiResponse.data;
+
+    if (!data || !data.api || data.api.status !== 'ok') {
+      return rejectFunc(new Error(data.api?.message || 'Không tìm thấy thông tin video'));
+    }
+
+    const apiData = data.api;
+
+    const audioItems = apiData.mediaItems.filter(item => item.type === 'Audio');
+
+    if (audioItems.length === 0) {
+      console.error('Không tìm thấy audio trong response');
+      return rejectFunc(new Error('Không tìm thấy audio để tải'));
+    }
+
+    let selectedAudio = null;
+
+    selectedAudio = audioItems.find(item => 
+      item.mediaExtension === 'MP3' && item.mediaQuality === '128K'
+    );
+
+    if (!selectedAudio) {
+      selectedAudio = audioItems.find(item => 
+        item.mediaExtension === 'M4A' && item.mediaQuality === '128K'
+      );
+    }
+
+    if (!selectedAudio) {
+      const qualityOrder = ['128K', '48K'];
+      for (const quality of qualityOrder) {
+        selectedAudio = audioItems.find(item => item.mediaQuality === quality);
+        if (selectedAudio) break;
+      }
+    }
+
+    if (!selectedAudio) {
+      selectedAudio = audioItems[0];
+    }
+
+    const audioUrl = selectedAudio.mediaPreviewUrl || selectedAudio.mediaUrl;
+    const audioExtension = selectedAudio.mediaExtension.toLowerCase();
+
+    if (!audioUrl) {
+      return rejectFunc(new Error('Không có URL tải audio'));
+    }
+
+    console.log(`Đang tải audio: ${selectedAudio.mediaExtension} - ${selectedAudio.mediaQuality} (${selectedAudio.mediaFileSize})`);
+    const audioStream = await global.utils.streamURL(audioUrl, audioExtension);
+
+    if (!audioStream) {
+      return rejectFunc(new Error('Không thể tải audio'));
+    }
+
+    const result = {
+      title: apiData.title || 'Không rõ',
+      duration: apiData.mediaItems[0]?.mediaDuration || '0:00',
+      sub: apiData.userInfo?.followersCount || 0,
+      viewCount: apiData.mediaStats?.viewsCount || 0,
+      author: apiData.userInfo?.name || 'Không rõ',
+      timestart,
+      audioStream: audioStream,
+      audioExtension: audioExtension
+    };
+    resolveFunc(result);
+
+  } catch (err) {
+    console.error('Lỗi khi tải nhạc:', err.message);
+    console.error(err.stack);
+    if (err.response) {
+      console.error('API response status:', err.response.status);
+    }
+    rejectFunc(err);
+  }
+
+  return returnPromise;
+}
+
+function getVideoIdFromUrl(url) {
+  const patterns = [
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/)([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/.*[?&]v=([a-zA-Z0-9_-]{11})/
+  ];
+
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+
+  return null;
+}
+
+module.exports = {
+  config: {
+    name: "sing",
+    version: "1.0.0",
+    hasPermssion: 0,
+    credits: "TKhanh",
+    description: "Phát nhạc từ link YouTube hoặc từ khoá tìm kiếm",
+    commandCategory: "Công cụ",
+    aliases: ["music", "song"],
+    usages: "[tên nhạc]",
+    cooldowns: 2,
+    usePrefix: true
+  },
+
+  run: async function ({ api, event, args, Users }) {
+    const moment = require("moment-timezone");
+    const { join } = require("path");
+
+    let name;
+    try {
+      name = await Users.getNameUser(event.senderID);
+    } catch (err) {
+      name = "Người dùng Facebook";
+    }
+
+    if (args.length === 0 || !args.join("")) {
+      return api.sendMessage('❗ Vui lòng cung cấp tên bài hát!', event.threadID, event.messageID);
+    }
+
+    const keywordSearch = args.join(" ");
+    const path = join(__dirname, `../../Miku/data/temp/music-${event.senderID}.mp3`);
+    if (fs.existsSync(path)) {
+      try { fs.unlinkSync(path); } catch (e) { console.error('Xóa file cũ thất bại:', e.message); }
+    }
+
+    if (keywordSearch.includes("youtube.com") || keywordSearch.includes("youtu.be")) {
+      try {
+        const videoId = getVideoIdFromUrl(keywordSearch);
+        if (!videoId) {
+          return api.sendMessage('❗ Link YouTube không hợp lệ!', event.threadID, event.messageID);
+        }
+
+        const result = await downloadMusicFromYoutube(keywordSearch);
+        if (typeof result === 'string') {
+          return api.sendMessage(result, event.threadID, event.messageID);
+        }
+
+        try {
+          const thumbnailUrl = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+          const stream = await global.utils.streamURL(thumbnailUrl, 'jpg');
+          if (stream) {
+            api.sendMessage({
+              body: `🎧 Tên bài: ${result.title}\n` +
+                `⏱️ Thời lượng: ${result.duration}\n` +
+                `🌐 Tác giả: ${result.author}\n` +
+                `👥 Lượt theo dõi: ${result.sub}\n` +
+                `👁️ Lượt xem: ${result.viewCount}\n` +
+                `👤 Yêu cầu bởi: ${name}\n` +
+                `⌛ Thời gian xử lý: ${Math.floor((Date.now() - result.timestart) / 1000)} giây`,          
+              attachment: stream
+            }, event.threadID, event.messageID);
+          }
+        } catch (thumbnailErr) {
+          console.error('Lỗi khi tải thumbnail:', thumbnailErr.message);
+        }
+
+        api.setMessageReaction("✅", event.messageID, () => {}, true);
+        return api.sendMessage({
+          attachment: result.audioStream,
+          body: `🎵 ${result.title}`
+        }, event.threadID, event.messageID);
+
+      } catch (e) {
+        console.error('Lỗi khi tải từ link:', e.message);
+        console.error(e.stack);
+        api.sendMessage('Đã xảy ra lỗi khi tải nhạc từ link!', event.threadID, event.messageID);
+      }
+      return;
+    }
+
+    try {
+      const Youtube = require('youtube-search-api');
+      api.setMessageReaction("⌛", event.messageID, () => {}, true);
+
+      const data = (await Youtube.GetListByKeyword(keywordSearch, false, 10)).items;
+      if (!data || data.length === 0) {
+        api.setMessageReaction("❎", event.messageID, () => {}, true);
+        return api.sendMessage('❌ Không tìm thấy kết quả nào cho từ khóa này!', event.threadID, event.messageID);
+      }
+
+      let videos = [], msg = "", num = 0;
+      for (let value of data) {
+        if (value.id) {
+          let videoId;
+
+          if (typeof value.id === 'object' && value.id.videoId) {
+            videoId = value.id.videoId;
+          }
+          else if (typeof value.id === 'string') {
+            if (value.id.includes('youtube.com') || value.id.includes('youtu.be')) {
+              const extractedId = getVideoIdFromUrl(value.id);
+              videoId = extractedId || value.id;
+            }
+            else if (value.id.length === 11) {
+              videoId = value.id;
+            }
+            else {
+              videoId = value.id;
+            }
+          }
+          else {
+            videoId = value.id;
+          }
+
+          videos.push({
+            videoId: videoId,
+            title: value.title,
+            channelTitle: value.channelTitle || 'Không rõ',
+            length: value.length?.simpleText || 'N/A',
+            originalId: value.id
+          });
+          num++;
+          msg += `${num} - ${value.title}\n` +
+                 `⩺ 📺 Tên kênh: ${value.channelTitle || 'Không rõ'}\n` +
+                 `⩺ ⏱️ Thời lượng: ${value.length?.simpleText || 'N/A'}\n` +
+                 `──────────────────\n`;
+        }
+      }
+
+      const body = `[ Kết Quả Tìm Kiếm ]\n──────────────────\n${msg}` +
+                   `📌 Trả lời tin nhắn này kèm số thứ tự tương ứng với bài hát mà bạn chọn nha ${name}`;
+
+      api.setMessageReaction("✅", event.messageID, () => {}, true);
+      return api.sendMessage(body, event.threadID, (error, info) => {
+        if (error) return;
+        global.client.handleReply.push({
+          type: 'reply',
+          name: this.config.name,
+          messageID: info.messageID,
+          author: event.senderID,
+          videos
+        });
+      }, event.messageID);
+
+    } catch (e) {
+      console.error(e.stack);
+      api.setMessageReaction("❎", event.messageID, () => {}, true);
+      api.sendMessage('❌ Lỗi khi tìm kiếm trên YouTube!', event.threadID, event.messageID);
+    }
+  },
+
+  handleReply: async function ({ api, event, handleReply, Users }) {
+    const { join } = require("path");
+    if (handleReply.author !== event.senderID) return;
+
+    const choice = parseInt(event.body.trim());
+    if (isNaN(choice) || choice < 1 || choice > handleReply.videos.length) {
+      return api.sendMessage('❗ Vui lòng trả lời một số hợp lệ!', event.threadID, event.messageID);
+    }
+
+    api.setMessageReaction("⌛", event.messageID, () => {}, true);
+    const selectedVideo = handleReply.videos[choice - 1];
+    const url = `https://www.youtube.com/watch?v=${selectedVideo.videoId}`;
+
+    let name = "Người dùng Facebook";
+    try {
+      name = await Users.getNameUser(event.senderID);
+    } catch (err) {
+      console.error(err)
+    }
+
+    try {
+      const result = await downloadMusicFromYoutube(url);
+
+      try {
+        const thumbnailUrl = `https://img.youtube.com/vi/${selectedVideo.videoId}/maxresdefault.jpg`;
+        const stream = await global.utils.streamURL(thumbnailUrl, 'jpg');
+        if (stream) {
+          api.sendMessage({
+            body: `🎵 Tên bài: ${result.title}\n` +
+              `⏰ Thời lượng: ${result.duration}\n` +
+              `🌐 Tác giả: ${result.author}\n` +
+              `👤 Yêu cầu bởi: ${name}\n` +
+              `⌛ Thời gian xử lý: ${Math.floor((Date.now() - result.timestart) / 1000)} giây`,
+            attachment: stream
+          }, event.threadID, event.messageID);
+        }
+      } catch (thumbnailErr) {
+        console.error('Lỗi khi tải thumbnail:', thumbnailErr.message);
+      }
+
+      api.unsendMessage(handleReply.messageID);
+      api.setMessageReaction("✅", event.messageID, () => {}, true);
+     return api.sendMessage({
+        attachment: result.audioStream,
+      }, event.threadID);
+
+    } catch (e) {
+      console.error(e.stack);
+      api.sendMessage('Đã xảy ra lỗi khi tải nhạc!', event.threadID, event.messageID);
+    }
+  }
+};
